@@ -258,6 +258,19 @@ tbody tr:hover td{background:var(--surface2)}
 .lgbox .lg img{display:block;width:150px;margin:0 auto}
 .lgbox label{font-size:13px;font-weight:600;color:var(--muted)}
 .lgerr{color:var(--danger);font-size:14px;min-height:20px}
+.lghint{font-size:12px;color:var(--muted);margin-top:-4px}
+.owner{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.owner.none{color:var(--muted)}
+.av.xs{width:22px;height:22px;font-size:10px}
+.assignee{display:flex;align-items:center;gap:6px;margin-top:8px;font-size:12px;color:var(--muted)}
+.team-add{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:10px;align-items:end}
+.team-add label{font-size:13px;font-weight:600;color:var(--muted)}
+.team-add input{margin-top:4px;width:100%}
+@media (max-width:760px){.team-add{grid-template-columns:1fr}}
+.team-table td .acts2{display:flex;gap:6px;justify-content:flex-end}
+.roletag{display:inline-block;font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px;background:var(--surface2);color:var(--muted);margin-left:6px;vertical-align:middle}
+#toast a{color:inherit;font-weight:700;margin-left:10px;text-decoration:underline}
+#toast.on.link{pointer-events:auto}
 
 /* responsive */
 @media (max-width:980px){
@@ -313,6 +326,9 @@ tbody tr:hover td{background:var(--surface2)}
 <div id="login" class="login" hidden>
   <form id="lgform" class="lgbox">
     <div class="lg"><img data-logo alt="Pearls Construction LLC"></div>
+    <label for="lgem">Email</label>
+    <input type="email" id="lgem" autocomplete="username" placeholder="you@pearls.com">
+    <div class="lghint">Admin: leave email empty and use the admin password.</div>
     <label for="lgpw">Password</label>
     <input type="password" id="lgpw" autocomplete="current-password">
     <div id="lgerr" class="lgerr" role="alert"></div>
@@ -399,20 +415,28 @@ const IDX=Object.fromEntries(STAGES.map((s,i)=>[s.id,i]));
 const SNAME=Object.fromEntries(STAGES.map(s=>[s.id,s.name]));
 const SICON=Object.fromEntries(STAGES.map(s=>[s.id,s.icon]));
 const PROJECTS=['New build','Renovation','Extension','Commercial fit-out','Roofing','External works','Other'];
-const SOURCES=['Referral','Website','Social media','Walk-in','Phone call','Tender','Repeat client'];
+const SOURCES=['Referral','Website','Social media','Walk-in','Phone call','Bids','Repeat client'];
+/* Older leads were saved with source "Tender"; they now show as "Bids". */
+const fixSource=l=>{if(l&&l.source==='Tender')l.source='Bids';return l};
 const NAV=[
   {id:'dashboard',name:'Dashboard',icon:'dashboard'},
   {id:'leads',name:'Leads',icon:'users',bd:'b-leads'},
   {id:'pipeline',name:'Pipeline',icon:'board',bd:'b-pipe'},
-  {id:'analytics',name:'Analytics',icon:'chart'}
+  {id:'analytics',name:'Analytics',icon:'chart'},
+  {id:'team',name:'Team',icon:'briefcase',admin:true}
 ];
 
 /* ---------- state ---------- */
 const state={view:'dashboard',mkRange:'all',leads:[],currency:'USD',loading:true,offline:false,
-  q:'',stage:'all',source:'all',due:false,sort:'newest',editing:null,armed:null};
+  q:'',stage:'all',source:'all',owner:'all',due:false,sort:'newest',editing:null,armed:null,
+  me:IN_CLAUDE?{role:'admin',name:'Admin',email:''}:null,team:[]};
 let leadsCol=null,settingsDoc=null,downloads=null;
-let PW=BUILT_IN_PASSWORD||null;
-if(!IN_CLAUDE&&!PW){try{PW=localStorage.getItem('pears_crm_pw')}catch(e){}}
+let PW=BUILT_IN_PASSWORD||null,EM='';
+if(!IN_CLAUDE&&!PW){try{const s=JSON.parse(localStorage.getItem('pears_crm_auth')||'null');if(s&&s.p){PW=s.p;EM=s.e||''}else PW=localStorage.getItem('pears_crm_pw')}catch(e){}}
+const isAdmin=()=>!!(state.me&&state.me.role==='admin');
+const actor=()=>state.me?state.me.name:'';
+const memberByEmail=e=>state.team.find(m=>m.email===String(e||'').toLowerCase());
+const ownerName=l=>{if(!l.assignedTo)return '';const m=memberByEmail(l.assignedTo);return m?m.name:(l.assignedName||l.assignedTo)};
 let dragId=null;
 
 /* ---------- helpers ---------- */
@@ -448,7 +472,23 @@ function dueInfo(l,short){
   if(l.followUp===t)return {cls:'today',text:'Today'};
   return {cls:'',text:fmtDate(l.followUp)};
 }
-function toast(msg){const t=$('#toast');t.textContent=msg;t.classList.add('on');clearTimeout(toast.h);toast.h=setTimeout(()=>t.classList.remove('on'),2600)}
+function toast(msg,href,linkText){
+  const t=$('#toast');t.textContent=msg;
+  if(href){const a=document.createElement('a');a.href=href;a.textContent=linkText||'Open';t.appendChild(a)}
+  t.classList.toggle('link',!!href);t.classList.add('on');
+  clearTimeout(toast.h);toast.h=setTimeout(()=>t.classList.remove('on','link'),href?9000:2600);
+}
+/* Ready-to-send email telling a team member a lead is theirs. */
+function assignMailto(l){
+  const m=memberByEmail(l.assignedTo);const to=m?m.email:l.assignedTo;if(!to)return '';
+  const nm=m?m.name:(l.assignedName||'');
+  const lines=['Hi '+(nm.split(' ')[0]||'')+',','','A new lead has been assigned to you in Pearls CRM:','',
+    'Lead: '+l.name,l.company?'Company: '+l.company:null,l.phone?'Phone: '+l.phone:null,l.email?'Email: '+l.email:null,
+    'Project: '+(l.project||'—')+(l.location?' · '+l.location:''),l.value?'Estimated value: '+money(l.value):null,
+    'Source: '+(l.source||'—'),'Stage: '+(SNAME[l.stage]||l.stage),l.followUp?'Next follow-up: '+fmtDate(l.followUp):null,
+    l.notes?'Notes: '+l.notes:null,'','Open the CRM: '+location.origin+'/','','Thanks,',actor()].filter(x=>x!==null);
+  return 'mailto:'+encodeURIComponent(to)+'?subject='+encodeURIComponent('New lead assigned: '+l.name)+'&body='+encodeURIComponent(lines.join('\n'));
+}
 const newId=()=>'l_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
 const clean=o=>JSON.parse(JSON.stringify(o));
 const reached=l=>{const m=l.maxStage!=null?RANK[l.maxStage]:RANK[l.stage];return m==null?0:m};
@@ -469,14 +509,18 @@ function localUpsert(l){
   renderAll();
 }
 async function api(method,body,q){
-  const r=await fetch('/api/leads'+(q||''),{method,headers:{'Content-Type':'application/json','x-crm-password':PW||''},body:body?JSON.stringify(body):undefined});
+  const r=await fetch('/api/leads'+(q||''),{method,headers:{'Content-Type':'application/json','x-crm-password':PW||'','x-crm-email':EM||''},body:body?JSON.stringify(body):undefined});
   if(r.status===401){signOut(true);throw new Error('Wrong password')}
+  if(r.status===403){let m='Not allowed';try{const j=await r.json();if(j.error)m=j.error}catch(e){}throw new Error(m)}
   if(!r.ok){let m='Server error '+r.status;try{const j=await r.json();if(j.error)m=j.error}catch(e){}throw new Error(m)}
   return r.json();
 }
 async function loadAll(){
   const d=await api('GET');
-  state.leads=d.leads||[];
+  state.leads=(d.leads||[]).map(fixSource);
+  state.me=d.me||{role:'admin',name:'Admin',email:''};
+  state.team=d.team||[];
+  if(!isAdmin()&&(state.view==='team'))state.view='dashboard';
   if(d.settings&&d.settings.currency)state.currency=d.settings.currency;
   state.loading=false;state.offline=false;renderAll();
 }
@@ -501,6 +545,7 @@ async function removeLead(id){
   if(!IN_CLAUDE){try{await api('DELETE',null,'?id='+encodeURIComponent(id))}catch(e){state.leads=keep;renderAll();toast('Could not delete.');throw e}}
 }
 async function saveCurrency(c){
+  if(!isAdmin()){renderAll();return}
   state.currency=c;renderAll();
   try{
     if(IN_CLAUDE){if(settingsDoc)await settingsDoc.set({currency:c})}
@@ -508,20 +553,21 @@ async function saveCurrency(c){
   }catch(e){}
 }
 function signOut(wrong){
-  try{localStorage.removeItem('pears_crm_pw')}catch(e){}
-  PW=null;state.leads=[];state.loading=true;renderAll();showLogin(wrong?'That password was not accepted.':'');
+  try{localStorage.removeItem('pears_crm_pw');localStorage.removeItem('pears_crm_auth')}catch(e){}
+  PW=null;EM='';state.leads=[];state.team=[];state.me=null;state.owner='all';state.view='dashboard';state.loading=true;renderAll();showLogin(wrong?'That email or password was not accepted.':'');
 }
-function showLogin(msg){$('#login').hidden=false;$('#lgerr').textContent=msg||'';setTimeout(()=>$('#lgpw').focus(),50)}
+function showLogin(msg){$('#login').hidden=false;$('#lgerr').textContent=msg||'';setTimeout(()=>($('#lgem').value?$('#lgpw'):$('#lgem')).focus(),50)}
 async function tryLogin(){
   const v=$('#lgpw').value;if(!v)return;
-  PW=v;
-  try{await loadAll();try{localStorage.setItem('pears_crm_pw',v)}catch(e){}$('#login').hidden=true;$('#lgpw').value='';startPolling()}
-  catch(e){PW=null;$('#lgerr').textContent=e.message==='Wrong password'?'That password was not accepted.':e.message}
+  const em=$('#lgem').value.trim().toLowerCase();
+  PW=v;EM=em;
+  try{await loadAll();try{localStorage.setItem('pears_crm_auth',JSON.stringify({e:em,p:v}));localStorage.removeItem('pears_crm_pw')}catch(e){}$('#login').hidden=true;$('#lgpw').value='';startPolling()}
+  catch(e){PW=null;EM='';$('#lgerr').textContent=e.message==='Wrong password'?'That email or password was not accepted.':e.message}
 }
 let poll=null;
 function startPolling(){
   clearInterval(poll);
-  poll=setInterval(()=>{if(document.hidden||dragId||state.editing)return;loadAll().catch(()=>{})},20000);
+  poll=setInterval(()=>{if(document.hidden||dragId||state.editing||state.view==='team')return;loadAll().catch(()=>{})},20000);
 }
 
 /* ---------- stage moves ---------- */
@@ -529,7 +575,7 @@ async function moveLead(id,stage){
   const l=state.leads.find(x=>x.id===id);
   if(!l||l.stage===stage)return;
   const act=(l.activity||[]).slice();
-  act.unshift({t:Date.now(),text:'Moved from '+SNAME[l.stage]+' to '+SNAME[stage]});
+  act.unshift({t:Date.now(),text:'Moved from '+SNAME[l.stage]+' to '+SNAME[stage],by:actor()});
   let ms=l.maxStage!=null?l.maxStage:(RANK[l.stage]!=null?l.stage:'new');
   if(RANK[stage]!=null&&RANK[stage]>(RANK[ms]||0))ms=stage;
   try{await patchLead(id,{stage,maxStage:ms,activity:act});toast(l.name+' moved to '+SNAME[stage])}catch(e){}
@@ -541,8 +587,9 @@ function filtered(){
   let r=state.leads.filter(l=>{
     if(state.stage==='open'?!isOpen(l):(state.stage!=='all'&&l.stage!==state.stage))return false;
     if(state.source!=='all'&&l.source!==state.source)return false;
+    if(state.owner==='none'?!!l.assignedTo:(state.owner!=='all'&&l.assignedTo!==state.owner))return false;
     if(state.due&&!(isOpen(l)&&l.followUp&&l.followUp<=today()))return false;
-    if(q){const h=[l.name,l.company,l.phone,l.email,l.location,l.project,l.notes].join(' ').toLowerCase();if(!h.includes(q))return false}
+    if(q){const h=[l.name,l.company,l.phone,l.email,l.location,l.project,l.notes,ownerName(l)].join(' ').toLowerCase();if(!h.includes(q))return false}
     return true;
   });
   const s=state.sort;
@@ -556,12 +603,13 @@ function filtered(){
 
 /* ---------- chrome ---------- */
 function buildNav(){
-  $('#nav').innerHTML=NAV.map(n=>'<button class="nav-item" data-view="'+n.id+'">'+ic(n.icon)+'<span>'+n.name+'</span>'+(n.bd?'<span class="bd" id="'+n.bd+'">0</span>':'')+'</button>').join('');
+  $('#nav').innerHTML=NAV.filter(n=>!n.admin||(isAdmin()&&!IN_CLAUDE)).map(n=>'<button class="nav-item" data-view="'+n.id+'">'+ic(n.icon)+'<span>'+n.name+'</span>'+(n.bd?'<span class="bd" id="'+n.bd+'">0</span>':'')+'</button>').join('');
   $('#add').innerHTML=ic('plus')+'<span>Add lead</span>';
   $('#export').innerHTML=ic('download');
   $('#signout').innerHTML=ic('logout');
 }
 function renderChrome(){
+  const nk=isAdmin()?'a':'m';if(buildNav.k!==nk){buildNav.k=nk;buildNav()}
   document.querySelectorAll('.nav-item').forEach(b=>{const on=b.dataset.view===state.view;b.classList.toggle('on',on);b.setAttribute('aria-current',on?'page':'false')});
   const open=state.leads.filter(isOpen).length;
   const bl=$('#b-leads');if(bl)bl.textContent=state.leads.length;
@@ -571,10 +619,12 @@ function renderChrome(){
     dashboard:['Dashboard',long],
     leads:['Leads',state.leads.length+' leads · '+open+' open'],
     pipeline:['Pipeline','Drag a card to move a lead to another stage'],
-    analytics:['Analytics','Performance across all leads']
-  }[state.view];
+    analytics:['Analytics',isAdmin()?'Performance across all leads':'Performance of your leads'],
+    team:['Team','Business development team · assign leads and track each person']
+  }[state.view]||['Dashboard',long];
+  if(state.me&&!IN_CLAUDE)T[1]=T[1]+' · Signed in as '+state.me.name+(isAdmin()?' (admin)':'');
   $('#ptitle').textContent=T[0];$('#psub').textContent=T[1];
-  $('#cur').value=state.currency;
+  $('#cur').value=state.currency;$('#cur').disabled=!isAdmin();
   $('#banner').innerHTML=state.offline?'<div class="banner">This page is not connected to a database, so changes are lost when you close it.</div>':'';
   $('#export').hidden=IN_CLAUDE?!downloads:false;
   $('#signout').hidden=IN_CLAUDE||!!BUILT_IN_PASSWORD;
@@ -638,11 +688,11 @@ function renderDashboard(){
   else if(thisM)delta='<span class="up">▲ New this month</span>';
   const dueList=open.filter(l=>l.followUp&&l.followUp<=today()).sort((a,b)=>a.followUp>b.followUp?1:-1);
   const top=open.slice().sort((a,b)=>(b.value||0)-(a.value||0)).slice(0,5);
-  const feed=[];all.forEach(l=>(l.activity||[]).forEach(a=>feed.push({t:a.t,text:a.text,name:l.name,id:l.id})));
+  const feed=[];all.forEach(l=>(l.activity||[]).forEach(a=>feed.push({t:a.t,text:a.text+(a.by?' · by '+a.by:''),name:l.name,id:l.id})));
   feed.sort((a,b)=>b.t-a.t);
   const total=all.length||1;
   const segs=TILES.map(id=>({id,n:all.filter(l=>l.stage===id).length}));
-  const samples=all.some(l=>l.sample);
+  const samples=isAdmin()&&all.some(l=>l.sample);
 
   $('#view').innerHTML='<div class="stack">'+
    '<div class="kpis">'+
@@ -673,24 +723,31 @@ function renderDashboard(){
 /* ---------- leads ---------- */
 function stageOptions(sel){return STAGES.map(s=>'<option value="'+s.id+'"'+(s.id===sel?' selected':'')+'>'+s.name+'</option>').join('')}
 function stageSelect(l){return '<span class="stagewrap" style="--sc:var(--c-'+l.stage+')">'+ic(SICON[l.stage])+'<select class="stagesel" data-move="'+esc(l.id)+'" aria-label="Stage for '+esc(l.name)+'">'+stageOptions(l.stage)+'</select></span>'}
+function ownerHtml(l){const n=ownerName(l);return n?'<span class="owner">'+avatar(n,'xs')+esc(n)+'</span>':'<span class="owner none">Unassigned</span>'}
+function ownerFilter(){
+  if(!isAdmin()||IN_CLAUDE)return '';
+  return '<select id="fowner" aria-label="Filter by team member"><option value="all">All team</option><option value="none"'+(state.owner==='none'?' selected':'')+'>Unassigned</option>'+
+    state.team.map(m=>'<option value="'+esc(m.email)+'"'+(state.owner===m.email?' selected':'')+'>'+esc(m.name)+'</option>').join('')+'</select>';
+}
 function renderLeadsView(){
   $('#view').innerHTML=
   '<div class="toolbar">'+
     '<div class="search">'+ic('search')+'<input type="search" id="q" placeholder="Search name, company, phone, location" value="'+esc(state.q)+'" aria-label="Search leads"></div>'+
     '<select id="fstage" aria-label="Filter by stage"><option value="all">All stages</option><option value="open"'+(state.stage==='open'?' selected':'')+'>Open leads</option>'+STAGES.map(s=>'<option value="'+s.id+'"'+(state.stage===s.id?' selected':'')+'>'+s.name+'</option>').join('')+'</select>'+
-    '<select id="fsource" aria-label="Filter by source"><option value="all">All sources</option>'+SOURCES.map(s=>'<option'+(state.source===s?' selected':'')+'>'+s+'</option>').join('')+'</select>'+
+    '<select id="fsource" aria-label="Filter by source"><option value="all">All sources</option>'+SOURCES.map(s=>'<option'+(state.source===s?' selected':'')+'>'+s+'</option>').join('')+'</select>'+ownerFilter()+
     '<select id="fsort" aria-label="Sort leads">'+[['newest','Newest first'],['value','Highest value'],['followup','Follow-up soonest'],['name','Name A–Z']].map(o=>'<option value="'+o[0]+'"'+(state.sort===o[0]?' selected':'')+'>'+o[1]+'</option>').join('')+'</select>'+
     (state.due?'<button class="btn small" id="cleardue">Follow-ups due · clear</button>':'')+
+    (state.owner!=='all'?'<button class="btn small" id="clearowner">'+esc(state.owner==='none'?'Unassigned':(memberByEmail(state.owner)||{name:state.owner}).name)+' · clear</button>':'')+
     '<span class="count" id="cnt"></span></div>'+
-  '<div class="tablewrap"><table><thead><tr><th>Lead</th><th>Project</th><th>Stage</th><th class="num">Value</th><th>Follow-up</th><th>Source</th></tr></thead><tbody id="tbody"></tbody></table></div>';
+  '<div class="tablewrap"><table><thead><tr><th>Lead</th><th>Project</th><th>Stage</th><th class="num">Value</th><th>Follow-up</th><th>Source</th><th>Assigned to</th></tr></thead><tbody id="tbody"></tbody></table></div>';
   updateLeadsList();
 }
 function updateLeadsList(){
   const r=filtered();
   $('#cnt').textContent=r.length+' of '+state.leads.length+' leads';
-  if(state.loading){$('#tbody').innerHTML='<tr><td colspan="6"><div class="empty">Loading leads…</div></td></tr>';return}
+  if(state.loading){$('#tbody').innerHTML='<tr><td colspan="7"><div class="empty">Loading leads…</div></td></tr>';return}
   if(!r.length){
-    $('#tbody').innerHTML='<tr><td colspan="6"><div class="empty"><b>'+(state.leads.length?'No leads match these filters':'No leads yet')+'</b>'+(state.leads.length?'Clear the search or filters to see more.':'Select Add lead to enter your first enquiry.')+'</div></td></tr>';return;
+    $('#tbody').innerHTML='<tr><td colspan="7"><div class="empty"><b>'+(state.leads.length?'No leads match these filters':'No leads yet')+'</b>'+(state.leads.length?'Clear the search or filters to see more.':'Select Add lead to enter your first enquiry.')+'</div></td></tr>';return;
   }
   $('#tbody').innerHTML=r.map(l=>{
     const d=dueInfo(l);
@@ -699,7 +756,8 @@ function updateLeadsList(){
       '<td>'+stageSelect(l)+'</td>'+
       '<td class="num">'+money(l.value)+'</td>'+
       '<td><span class="due '+d.cls+'">'+(l.followUp&&isOpen(l)?ic('calendar','sm'):'')+esc(d.text)+'</span></td>'+
-      '<td>'+esc(l.source||'—')+'</td></tr>'}).join('');
+      '<td>'+esc(l.source||'—')+'</td>'+
+      '<td>'+ownerHtml(l)+'</td></tr>'}).join('');
 }
 
 /* ---------- pipeline ---------- */
@@ -717,6 +775,7 @@ function renderPipeline(){
           '<div class="top">'+avatar(l.name,'sm')+'<div style="min-width:0"><div class="t">'+esc(l.name)+'</div><div class="sub">'+esc([l.company,l.project].filter(Boolean).join(' · '))+'</div></div></div>'+
           (l.location?'<div class="sub" style="margin-top:8px;display:flex;gap:5px;align-items:center">'+ic('pin','sm')+esc(l.location)+'</div>':'')+
           '<div class="row"><span class="v">'+money(l.value)+'</span>'+(l.followUp&&isOpen(l)?'<span class="due '+d.cls+'">'+ic('calendar','sm')+esc(d.text)+'</span>':'')+'</div>'+
+          (isAdmin()&&!IN_CLAUDE?'<div class="assignee">'+ownerHtml(l)+'</div>':'')+
           '<select class="mv" data-move="'+esc(l.id)+'" aria-label="Move '+esc(l.name)+' to stage">'+stageOptions(l.stage)+'</select></div>'}).join(''):'<div class="dropnote">'+(state.loading?'Loading…':'Drop a lead here')+'</div>')+'</div></section>'}).join('')+'</div>';
 }
 
@@ -765,11 +824,60 @@ function renderAnalytics(){
   '</div>';
 }
 
+/* ---------- team (admin only) ---------- */
+function teamStats(list){
+  const open=list.filter(isOpen),won=list.filter(l=>l.stage==='won'),lost=list.filter(l=>l.stage==='lost');
+  const closed=won.length+lost.length;
+  return {n:list.length,open:open.length,openV:sumV(open),won:won.length,wonV:sumV(won),
+    wr:closed?Math.round(won.length/closed*100)+'%':'—',
+    due:open.filter(l=>l.followUp&&l.followUp<=today()).length};
+}
+function renderTeam(){
+  if(!isAdmin()){state.view='dashboard';renderView();return}
+  const L=state.leads;
+  const rows=state.team.map(m=>Object.assign({m},teamStats(L.filter(l=>l.assignedTo===m.email))));
+  const un=teamStats(L.filter(l=>!l.assignedTo));
+  const tr=(key,name,sub,st,acts)=>'<tr data-owner="'+esc(key)+'"><td><div class="who">'+avatar(name)+'<div><div class="nm2">'+esc(name)+'</div><div class="sub">'+esc(sub)+'</div></div></div></td>'+
+    '<td class="c">'+st.n+'</td><td class="c">'+st.open+'</td><td class="num">'+money(st.openV,true)+'</td><td class="c">'+st.won+'</td><td class="num">'+money(st.wonV,true)+'</td><td class="c">'+st.wr+'</td>'+
+    '<td class="c">'+(st.due?'<span class="due over">'+st.due+'</span>':'0')+'</td><td>'+(acts||'')+'</td></tr>';
+  const ed=state.teamEdit?memberByEmail(state.teamEdit):null;
+  $('#view').innerHTML='<div class="stack">'+
+    '<div class="card"><div class="card-head"><div><h3>'+(ed?'Edit '+esc(ed.name):'Add a team member')+'</h3><p class="hint">'+
+      (ed?'Change the name, or type a new password to reset it. Leave the password empty to keep it.':'They sign in with this email and password and see only the leads you assign to them. Send them the password yourself.')+'</p></div></div>'+
+      '<form class="team-add" id="tmform">'+
+        '<label>Name<input type="text" id="tm_name" value="'+esc(ed?ed.name:'')+'" placeholder="e.g. Ahmed Hassan"></label>'+
+        '<label>Email<input type="email" id="tm_email" value="'+esc(ed?ed.email:'')+'"'+(ed?' disabled':'')+' placeholder="ahmed@pearls.com"></label>'+
+        '<label>'+(ed?'New password':'Password')+'<input type="text" id="tm_pw" autocomplete="new-password" placeholder="At least 6 characters"></label>'+
+        '<div style="display:flex;gap:8px"><button class="btn primary" type="submit">'+(ed?'Save':'Add member')+'</button>'+(ed?'<button class="btn" type="button" data-act="tmcancel">Cancel</button>':'')+'</div>'+
+      '</form></div>'+
+    '<div class="card"><div class="card-head"><div><h3>Business development team</h3><p class="hint">Select a person to see their leads. Open a lead and choose <b>Assigned to</b> to hand it over.</p></div></div>'+
+      '<div class="mk-table team-table"><table><thead><tr><th>Team member</th><th class="c">Leads</th><th class="c">Open</th><th class="num">Open value</th><th class="c">Won</th><th class="num">Won value</th><th class="c">Win rate</th><th class="c">Follow-ups due</th><th></th></tr></thead><tbody>'+
+      (rows.length?rows.map(r=>tr(r.m.email,r.m.name,r.m.email,r,'<div class="acts2"><a class="btn small" href="mailto:'+esc(r.m.email)+'" title="Email">'+ic('mail','sm')+'</a><button class="btn small" data-act="tmedit" data-email="'+esc(r.m.email)+'">Edit</button>'+
+        '<button class="btn small danger" data-act="tmdel" data-email="'+esc(r.m.email)+'">'+(state.armed==='tm:'+r.m.email?'Confirm remove':'Remove')+'</button></div>')).join(''):'<tr><td colspan="9"><div class="empty"><b>No team members yet</b>Add your first business development person above.</div></td></tr>')+
+      tr('none','Unassigned','Leads nobody owns yet',un,'')+
+      '</tbody></table></div>'+
+      '<div class="note">Removing a person moves their leads back to Unassigned. Nothing is deleted.</div></div>'+
+  '</div>';
+}
+async function saveMember(){
+  const ed=state.teamEdit;
+  const name=$('#tm_name').value.trim(),email=ed||$('#tm_email').value.trim().toLowerCase(),pw=$('#tm_pw').value;
+  if(!name){toast('Enter a name.');return}
+  if(!ed&&!email){toast('Enter an email.');return}
+  try{await api('POST',{member:{name,email,password:pw}});state.teamEdit=null;await loadAll();toast(ed?'Saved':name+' added to the team')}
+  catch(e){toast(e.message)}
+}
+async function removeMember(email){
+  try{const r=await api('DELETE',null,'?member='+encodeURIComponent(email));state.armed=null;if(state.owner===email)state.owner='all';await loadAll();toast('Removed'+(r.unassigned?' · '+r.unassigned+' lead'+(r.unassigned===1?'':'s')+' now unassigned':''))}
+  catch(e){toast(e.message)}
+}
+
 /* ---------- master render ---------- */
 function renderView(){
   if(state.view==='dashboard')renderDashboard();
   else if(state.view==='leads')renderLeadsView();
   else if(state.view==='pipeline')renderPipeline();
+  else if(state.view==='team')renderTeam();
   else renderAnalytics();
 }
 function renderAll(){
@@ -785,7 +893,15 @@ function openDrawer(id){
   const l=id?state.leads.find(x=>x.id===id):null;
   state.editing=id||'new';state.armed=null;
   const v=l||{name:'',company:'',phone:'',email:'',project:PROJECTS[0],location:'',value:'',source:SOURCES[0],stage:'new',followUp:'',notes:''};
-  const quick=l&&(l.phone||l.email)?'<div class="quick">'+(l.phone?'<a class="btn small" href="tel:'+esc(l.phone.replace(/\s+/g,''))+'">'+ic('phone','sm')+'Call</a>':'')+(l.email?'<a class="btn small" href="mailto:'+esc(l.email)+'">'+ic('mail','sm')+'Email</a>':'')+'</div>':'';
+  const mailOwner=l&&l.assignedTo&&isAdmin()?assignMailto(l):'';
+  const quick=l&&(l.phone||l.email||mailOwner)?'<div class="quick">'+(l.phone?'<a class="btn small" href="tel:'+esc(l.phone.replace(/\s+/g,''))+'">'+ic('phone','sm')+'Call</a>':'')+(l.email?'<a class="btn small" href="mailto:'+esc(l.email)+'">'+ic('mail','sm')+'Email</a>':'')+
+    (mailOwner?'<a class="btn small" href="'+esc(mailOwner)+'">'+ic('mail','sm')+'Email '+esc(ownerName(l).split(' ')[0])+' about this lead</a>':'')+'</div>':'';
+  const curOwner=l?(l.assignedTo||''):'';
+  const ownerField=IN_CLAUDE?'':isAdmin()
+    ?'<label class="full">Assigned to<select id="f_owner"><option value="">Unassigned</option>'+state.team.map(m=>'<option value="'+esc(m.email)+'"'+(m.email===curOwner?' selected':'')+'>'+esc(m.name)+' · '+esc(m.email)+'</option>').join('')+
+      (curOwner&&!memberByEmail(curOwner)?'<option value="'+esc(curOwner)+'" selected>'+esc(ownerName(l))+' (removed)</option>':'')+'</select>'+
+      (state.team.length?'':'<span class="hint" style="font-weight:400">Add people in the Team page first.</span>')+'</label>'
+    :'<label class="full">Assigned to<input type="text" value="'+esc(l?ownerName(l)||actor():actor())+'" disabled></label>';
   $('#drawer').innerHTML=
     '<div class="dh">'+(l?avatar(l.name,'lg'):'<span class="chip-ic" style="--kc:var(--gold)">'+ic('plus','lg')+'</span>')+
       '<div style="min-width:0"><h2 id="dtitle">'+(l?esc(l.name):'Add lead')+'</h2>'+(l?'<div style="margin-top:4px">'+stageChip(l.stage)+'</div>':'')+'</div>'+
@@ -800,17 +916,17 @@ function openDrawer(id){
       '<label>Estimated value<input type="number" id="f_value" min="0" step="any" value="'+esc(v.value)+'"></label>'+
       '<label>Source<select id="f_source">'+SOURCES.map(p=>'<option'+(p===v.source?' selected':'')+'>'+p+'</option>').join('')+'</select></label>'+
       '<label>Stage<select id="f_stage">'+stageOptions(v.stage)+'</select></label>'+
-      '<label>Next follow-up<input type="date" id="f_follow" value="'+esc(v.followUp)+'"></label>'+
+      '<label>Next follow-up<input type="date" id="f_follow" value="'+esc(v.followUp)+'"></label>'+ownerField+
       '<label class="full">Notes<textarea id="f_notes">'+esc(v.notes)+'</textarea></label></div>'+
     '<div class="actions"><button class="btn primary" data-act="save">'+(l?'Save changes':'Add lead')+'</button><button class="btn" data-act="close">Cancel</button>'+
-      (l?'<button class="btn danger sp" data-act="delete">Delete lead</button>':'')+'</div>'+
+      (l&&isAdmin()?'<button class="btn danger sp" data-act="delete">Delete lead</button>':'')+'</div>'+
     (l?'<div class="log"><h3>Activity</h3><div class="addnote"><input type="text" id="f_note" placeholder="Log a call, visit or quote"><button class="btn" data-act="note">Add note</button></div><ul id="loglist">'+logHtml(l)+'</ul></div>':'');
   $('#drawer').classList.add('on');$('#scrim').classList.add('on');
   setTimeout(()=>{const f=$('#f_name');if(f&&!l)f.focus()},60);
 }
 function logHtml(l){
   const a=l.activity||[];
-  return a.length?a.map(x=>'<li>'+esc(x.text)+'<time>'+fmtTime(x.t)+'</time></li>').join(''):'<li>No activity yet.</li>';
+  return a.length?a.map(x=>'<li>'+esc(x.text)+'<time>'+fmtTime(x.t)+(x.by?' · '+esc(x.by):'')+'</time></li>').join(''):'<li>No activity yet.</li>';
 }
 function closeDrawer(){$('#drawer').classList.remove('on');$('#scrim').classList.remove('on');state.editing=null}
 async function saveDrawer(){
@@ -818,22 +934,39 @@ async function saveDrawer(){
   if(!name){toast('Enter a name for this lead.');$('#f_name').focus();return}
   const base=state.editing!=='new'?state.leads.find(x=>x.id===state.editing):null;
   const stage=$('#f_stage').value;
-  const lead=Object.assign({},base||{id:newId(),created:Date.now(),activity:[{t:Date.now(),text:'Lead created'}],maxStage:'new'},{
+  const lead=Object.assign({},base||{id:newId(),created:Date.now(),activity:[{t:Date.now(),text:'Lead created',by:actor()}],maxStage:'new'},{
     name,company:$('#f_company').value.trim(),phone:$('#f_phone').value.trim(),email:$('#f_email').value.trim(),
     project:$('#f_project').value,location:$('#f_location').value.trim(),value:parseFloat($('#f_value').value)||0,
     source:$('#f_source').value,followUp:$('#f_follow').value,notes:$('#f_notes').value.trim(),stage,updated:Date.now()});
   if(base&&base.stage!==stage){
-    lead.activity=[{t:Date.now(),text:'Moved from '+SNAME[base.stage]+' to '+SNAME[stage]}].concat(base.activity||[]);
+    lead.activity=[{t:Date.now(),text:'Moved from '+SNAME[base.stage]+' to '+SNAME[stage],by:actor()}].concat(lead.activity||[]);
+  }
+  let assignedNow=false;
+  const ow=$('#f_owner');
+  if(ow){
+    const to=ow.value,before=base?(base.assignedTo||''):'';
+    if(to!==before){
+      const m=memberByEmail(to);
+      lead.assignedTo=to;lead.assignedName=m?m.name:'';
+      lead.assignedAt=Date.now();lead.assignedBy=actor();
+      lead.activity=[{t:Date.now(),text:to?'Assigned to '+(m?m.name:to):'Unassigned',by:actor()}].concat(lead.activity||[]);
+      assignedNow=!!to;
+    }
+  }else if(!base&&!IN_CLAUDE&&state.me&&!isAdmin()){
+    lead.assignedTo=state.me.email;lead.assignedName=state.me.name;
   }
   let ms=lead.maxStage||'new';
   if(RANK[stage]!=null&&RANK[stage]>(RANK[ms]||0))ms=stage;
   lead.maxStage=ms;
-  try{await saveLead(lead);toast(base?'Saved':'Lead added');closeDrawer()}catch(e){}
+  try{await saveLead(lead);closeDrawer();
+    if(assignedNow)toast((base?'Saved':'Lead added')+' · assigned to '+ownerName(lead),assignMailto(lead),'Email them');
+    else toast(base?'Saved':'Lead added');
+  }catch(e){}
 }
 async function addNote(){
   const inp=$('#f_note');const txt=inp.value.trim();if(!txt)return;
   const l=state.leads.find(x=>x.id===state.editing);if(!l)return;
-  const act=[{t:Date.now(),text:txt}].concat(l.activity||[]);
+  const act=[{t:Date.now(),text:txt,by:actor()}].concat(l.activity||[]);
   try{await patchLead(l.id,{activity:act});inp.value='';
     const fresh=state.leads.find(x=>x.id===l.id)||Object.assign({},l,{activity:act});
     $('#loglist').innerHTML=logHtml(fresh)}catch(e){}
@@ -841,7 +974,7 @@ async function addNote(){
 
 /* ---------- export ---------- */
 async function exportCsv(){
-  const cols=['name','company','phone','email','project','location','value','source','stage','followUp','notes'];
+  const cols=['name','company','phone','email','project','location','value','source','stage','followUp','assignedName','assignedTo','notes'];
   const cell=v=>'"'+String(v==null?'':v).replace(/"/g,'""')+'"';
   const text='\ufeff'+[cols.join(',')].concat(state.leads.map(l=>cols.map(c=>cell(l[c])).join(','))).join('\r\n');
   const filename='pearls-leads-'+today()+'.csv';
@@ -867,6 +1000,9 @@ document.addEventListener('click',async e=>{
     if(a==='close')closeDrawer();
     else if(a==='save')saveDrawer();
     else if(a==='note')addNote();
+    else if(a==='tmedit'){state.teamEdit=act.dataset.email;state.armed=null;renderView();window.scrollTo(0,0)}
+    else if(a==='tmcancel'){state.teamEdit=null;renderView()}
+    else if(a==='tmdel'){const em=act.dataset.email;if(state.armed!=='tm:'+em){state.armed='tm:'+em;renderView()}else removeMember(em)}
     else if(a==='refresh'){if(!IN_CLAUDE)loadAll().catch(()=>{});else renderAll();toast('Refreshed')}
     else if(a==='due'){state.due=true;state.stage='all';state.view='leads';renderAll();window.scrollTo(0,0)}
     else if(a==='delete'){
@@ -883,6 +1019,9 @@ document.addEventListener('click',async e=>{
   if(t.closest('#export')){exportCsv();return}
   if(t.closest('#signout')){signOut(false);return}
   if(t.id==='cleardue'){state.due=false;renderAll();return}
+  if(t.id==='clearowner'){state.owner='all';renderAll();return}
+  const orow=!t.closest('a')&&t.closest('tr[data-owner]');
+  if(orow){state.owner=orow.dataset.owner;state.stage='all';state.source='all';state.due=false;state.view='leads';renderAll();window.scrollTo(0,0);return}
   if(t.id==='scrim'){closeDrawer();return}
   if(t.closest('select[data-move]')||t.closest('a'))return;
   const srow=t.closest('tr[data-source]');
@@ -899,6 +1038,7 @@ document.addEventListener('change',e=>{
   if(t.id==='mkrange'){state.mkRange=t.value;renderAll();return}
   if(t.id==='fstage'){state.stage=t.value;renderAll()}
   if(t.id==='fsource'){state.source=t.value;renderAll()}
+  if(t.id==='fowner'){state.owner=t.value;renderAll()}
   if(t.id==='fsort'){state.sort=t.value;updateLeadsList()}
 });
 document.addEventListener('input',e=>{if(e.target.id==='q'){state.q=e.target.value;updateLeadsList()}});
@@ -915,6 +1055,7 @@ document.addEventListener('dragend',()=>{dragId=null;document.querySelectorAll('
 document.addEventListener('dragover',e=>{const c=e.target.closest&&e.target.closest('.col');if(!c||!dragId)return;e.preventDefault();document.querySelectorAll('.col.over').forEach(n=>{if(n!==c)n.classList.remove('over')});c.classList.add('over')});
 document.addEventListener('drop',e=>{const c=e.target.closest&&e.target.closest('.col');if(!c||!dragId)return;e.preventDefault();const id=dragId;dragId=null;c.classList.remove('over');moveLead(id,c.dataset.stage)});
 $('#lgform').addEventListener('submit',e=>{e.preventDefault();tryLogin()});
+document.addEventListener('submit',e=>{if(e.target.id==='tmform'){e.preventDefault();saveMember()}});
 
 /* ---------- boot ---------- */
 buildNav();
@@ -929,7 +1070,7 @@ renderAll();
     settingsDoc=db.doc('settings/main');
     settingsDoc.onSnapshot(s=>{if(s.exists){const c=(s.data()||{}).currency;if(c&&c!==state.currency){state.currency=c;renderAll()}}},()=>{});
     leadsCol.onSnapshot(snap=>{
-      state.leads=snap.docs.map(d=>Object.assign({id:d.id},d.data()));
+      state.leads=snap.docs.map(d=>fixSource(Object.assign({id:d.id},d.data())));
       state.loading=false;renderAll();
     },()=>{state.loading=false;state.offline=true;renderAll()});
     renderAll();
